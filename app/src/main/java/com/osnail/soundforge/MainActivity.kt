@@ -3,7 +3,9 @@ package com.osnail.soundforge
 import android.app.AlertDialog
 import android.net.Uri
 import android.os.Bundle
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -13,10 +15,14 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import org.json.JSONObject
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -35,6 +41,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var listCategories: LinearLayout
     private lateinit var trainProgress: android.widget.ProgressBar
     private lateinit var txtTrainProgress: TextView
+    private lateinit var txtRam: TextView
+    private lateinit var labelDuration: TextView
+    private lateinit var seekDuration: SeekBar
+    private lateinit var inputDuration: EditText
+    private lateinit var txtDurationCost: TextView
+    private lateinit var labelEpochs: TextView
+    private lateinit var seekEpochs: SeekBar
+
+    /** Guards the two-way slider <-> text field sync from looping. */
+    private var syncingDuration = false
+
+    private companion object {
+        const val MIN_SECONDS = 0.10f
+
+        /**
+         * Typing a custom length is allowed to go past the slider's 10s, but a
+         * Griffin-Lim pass costs roughly 3.4 MB per second per layer, so an
+         * unbounded value is a straight OOM. 60s is already ~200 MB.
+         */
+        const val MAX_SECONDS = 60.0f
+
+        const val MIN_EPOCHS = 10
+    }
 
     // ---- file pickers -------------------------------------------------
 
@@ -93,6 +122,13 @@ class MainActivity : AppCompatActivity() {
         listCategories = findViewById(R.id.listCategories)
         trainProgress = findViewById(R.id.trainProgress)
         txtTrainProgress = findViewById(R.id.txtTrainProgress)
+        txtRam = findViewById(R.id.txtRam)
+        labelDuration = findViewById(R.id.labelDuration)
+        seekDuration = findViewById(R.id.seekDuration)
+        inputDuration = findViewById(R.id.inputDuration)
+        txtDurationCost = findViewById(R.id.txtDurationCost)
+        labelEpochs = findViewById(R.id.labelEpochs)
+        seekEpochs = findViewById(R.id.seekEpochs)
 
         lib = Library(this)
         lib.load()
@@ -106,6 +142,10 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(sb: SeekBar?) {}
             override fun onStopTrackingTouch(sb: SeekBar?) {}
         })
+
+        setupDurationControls()
+        setupEpochControl()
+        startRamMonitor()
 
         findViewById<Button>(R.id.btnGenerate).setOnClickListener { generate() }
         findViewById<Button>(R.id.btnReplay).setOnClickListener {
@@ -131,6 +171,120 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         Player.stop()
+    }
+
+    // ---- duration / epochs / RAM --------------------------------------
+
+    /** Slider position as seconds: progress 0..990 -> 0.10..10.00s. */
+    private fun sliderSeconds(): Float = (seekDuration.progress + 10) / 100f
+
+    /** What GENERATE actually uses: the typed value if it parses, else the slider. */
+    private fun currentSeconds(): Float {
+        val typed = inputDuration.text.toString().trim().toFloatOrNull()
+        return (typed ?: sliderSeconds()).coerceIn(MIN_SECONDS, MAX_SECONDS)
+    }
+
+    private fun currentEpochs(): Int = MIN_EPOCHS + seekEpochs.progress
+
+    /** Peak Griffin-Lim working set for one layer of [seconds], same shape the vocoder allocates. */
+    private fun estimateMb(seconds: Float): Float {
+        val frames = (seconds * WavIO.SAMPLE_RATE / MelFeatures.HOP).toInt().coerceAtLeast(8)
+        val freqBins = MelFeatures.N_FFT / 2 + 1
+        val spec = freqBins.toLong() * frames * 8L          // magFull + re + im
+        val outLen = MelFeatures.N_FFT + MelFeatures.HOP.toLong() * (frames - 1)
+        val scratch = outLen * 8L * 3L + (outLen - MelFeatures.N_FFT) * 4L * 2L
+        return (3L * spec + scratch) / (1024f * 1024f)
+    }
+
+    private fun setupDurationControls() {
+        seekDuration.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    // Dragging wins over whatever was typed before.
+                    syncingDuration = true
+                    inputDuration.setText(String.format(Locale.US, "%.2f", (p + 10) / 100f))
+                    syncingDuration = false
+                }
+                updateDurationInfo()
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+
+        inputDuration.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (!syncingDuration) {
+                    val v = s?.toString()?.trim()?.toFloatOrNull()
+                    // Only follow the text while it is still on the slider's scale;
+                    // past 10s the slider just parks at its maximum.
+                    if (v != null && v >= MIN_SECONDS && v <= 10.0f) {
+                        syncingDuration = true
+                        seekDuration.progress = (v * 100).toInt() - 10
+                        syncingDuration = false
+                    }
+                }
+                updateDurationInfo()
+            }
+        })
+
+        inputDuration.setText(String.format(Locale.US, "%.2f", sliderSeconds()))
+        updateDurationInfo()
+    }
+
+    private fun updateDurationInfo() {
+        val raw = inputDuration.text.toString().trim()
+        val typed = raw.toFloatOrNull()
+        val secs = (typed ?: sliderSeconds()).coerceIn(MIN_SECONDS, MAX_SECONDS)
+
+        labelDuration.text = "Duration: ${String.format(Locale.US, "%.2f", secs)}s per layer"
+        val note = when {
+            raw.isNotEmpty() && typed == null -> " · not a number, using slider"
+            typed != null && typed > MAX_SECONDS -> " · capped at ${MAX_SECONDS.toInt()}s"
+            typed != null && typed < MIN_SECONDS -> " · min ${MIN_SECONDS}s"
+            else -> ""
+        }
+        txtDurationCost.text = String.format(Locale.US, "~%.1f MB/layer%s", estimateMb(secs), note)
+    }
+
+    private fun setupEpochControl() {
+        seekEpochs.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                labelEpochs.text = "Epochs: ${MIN_EPOCHS + p}"
+            }
+
+            override fun onStartTrackingTouch(sb: SeekBar?) {}
+            override fun onStopTrackingTouch(sb: SeekBar?) {}
+        })
+        labelEpochs.text = "Epochs: ${currentEpochs()}"
+    }
+
+    private fun startRamMonitor() {
+        lifecycleScope.launch {
+            // Only polls while the activity is actually on screen.
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    txtRam.text = ramLine()
+                    delay(500)
+                }
+            }
+        }
+    }
+
+    private fun ramLine(): String {
+        val rt = Runtime.getRuntime()
+        val mb = 1024.0 * 1024.0
+        val used = (rt.totalMemory() - rt.freeMemory()) / mb
+        val reserved = rt.totalMemory() / mb
+        val limit = rt.maxMemory() / mb
+        val native = android.os.Debug.getNativeHeapAllocatedSize() / mb
+        return String.format(
+            Locale.US,
+            "RAM  heap %.1f MB used · %.0f reserved · %.0f limit · native %.1f MB",
+            used, reserved, limit, native
+        )
     }
 
     // ---- model --------------------------------------------------------
@@ -168,8 +322,11 @@ class MainActivity : AppCompatActivity() {
         trainProgress.visibility = android.view.View.VISIBLE
         txtTrainProgress.visibility = android.view.View.VISIBLE
         findViewById<Button>(R.id.btnTrain).isEnabled = false
+        // The count is captured at launch; moving the slider mid-run must not
+        // change the epoch total the loop is already counting against.
+        seekEpochs.isEnabled = false
 
-        Trainer.startTraining(lifecycleScope, lib, epochs = 150) { s -> onTrainStatus(s) }
+        Trainer.startTraining(lifecycleScope, lib, epochs = currentEpochs()) { s -> onTrainStatus(s) }
     }
 
     private fun onTrainStatus(s: TrainStatus) {
@@ -181,6 +338,7 @@ class MainActivity : AppCompatActivity() {
             trainProgress.visibility = android.view.View.GONE
             txtTrainProgress.visibility = android.view.View.GONE
             findViewById<Button>(R.id.btnTrain).isEnabled = true
+            seekEpochs.isEnabled = true
             status(s.message)
             melModel = Trainer.loadModel(lib)
             updateModelInfo()
@@ -226,10 +384,40 @@ class MainActivity : AppCompatActivity() {
         }
 
         val variation = seekVariation.progress / 100f
-        txtResult.text = "Generating..."
+        // Read the controls on the main thread before handing off to Default.
+        val seconds = currentSeconds()
+
+        // Layers render one at a time, so peak cost is a single layer — but bail
+        // out before allocating rather than dying on a long custom duration.
+        val needMb = estimateMb(seconds)
+        val budgetMb = Runtime.getRuntime().maxMemory() / (1024f * 1024f) * 0.6f
+        if (needMb > budgetMb) {
+            txtResult.text = String.format(
+                Locale.US,
+                "%.2fs needs ~%.0f MB per layer, but only ~%.0f MB of heap is safe to use here.\n" +
+                    "Shorten the duration.",
+                seconds, needMb, budgetMb
+            )
+            return
+        }
+
+        txtResult.text = String.format(
+            Locale.US,
+            "Generating %.2fs x %d layer(s)...", seconds, matches.size
+        )
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
-                Generator.generate(mm, matches, variation)
+                try {
+                    Generator.generate(mm, matches, variation, secondsPerLayer = seconds)
+                } catch (e: OutOfMemoryError) {
+                    GenResult(
+                        FloatArray(0),
+                        String.format(
+                            Locale.US,
+                            "Ran out of memory rendering %.2fs. Try a shorter duration.", seconds
+                        )
+                    )
+                }
             }
             if (result.pcm.isEmpty()) {
                 txtResult.text = result.log
