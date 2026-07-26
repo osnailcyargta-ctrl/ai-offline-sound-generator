@@ -1,0 +1,131 @@
+package com.osnail.soundforge
+
+import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+
+/**
+ * A .sfpack file is just a zip:
+ *   library.json
+ *   model.json (optional)
+ *   sounds/*.wav
+ * Copy it to another phone, hit Import, and the whole trained set moves over.
+ */
+object DataPack {
+
+    fun export(lib: Library, out: OutputStream): String {
+        var files = 0
+        ZipOutputStream(out.buffered()).use { zip ->
+            if (lib.libFile.exists()) {
+                zip.putNextEntry(ZipEntry("library.json"))
+                zip.write(lib.libFile.readBytes())
+                zip.closeEntry()
+            }
+            if (lib.modelFile.exists()) {
+                zip.putNextEntry(ZipEntry("model.json"))
+                zip.write(lib.modelFile.readBytes())
+                zip.closeEntry()
+            }
+            for (cat in lib.categories) {
+                for (s in cat.samples) {
+                    val f = File(lib.soundsDir, s.file)
+                    if (!f.exists()) continue
+                    zip.putNextEntry(ZipEntry("sounds/${s.file}"))
+                    f.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                    files++
+                }
+            }
+        }
+        return "Exported ${lib.categories.size} categories, $files sounds"
+    }
+
+    /** merge = keep existing data and add the pack on top. */
+    fun import(lib: Library, input: InputStream, merge: Boolean): String {
+        val tmpDir = File(lib.soundsDir.parentFile, "import_tmp")
+        tmpDir.deleteRecursively()
+        tmpDir.mkdirs()
+        val tmpSounds = File(tmpDir, "sounds").apply { mkdirs() }
+
+        var libJson: ByteArray? = null
+        var modelJson: ByteArray? = null
+
+        ZipInputStream(input.buffered()).use { zip ->
+            var entry: ZipEntry? = zip.nextEntry
+            while (entry != null) {
+                val name = entry.name.replace('\\', '/')
+                when {
+                    name.endsWith("library.json") -> libJson = zip.readBytes()
+                    name.endsWith("model.json") -> modelJson = zip.readBytes()
+                    name.contains("sounds/") && name.endsWith(".wav") -> {
+                        val safe = name.substringAfterLast('/')
+                        if (safe.isNotEmpty()) {
+                            File(tmpSounds, safe).outputStream().use { zip.copyTo(it) }
+                        }
+                    }
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+
+        if (libJson == null) {
+            tmpDir.deleteRecursively()
+            return "Invalid pack: library.json missing"
+        }
+
+        val parsed = parseCategories(String(libJson!!, Charsets.UTF_8))
+
+        if (!merge) {
+            lib.soundsDir.listFiles()?.forEach { it.delete() }
+            lib.categories.clear()
+        }
+
+        var added = 0
+        for (cat in parsed) {
+            val target = lib.find(cat.name) ?: Category(cat.name).also { lib.categories.add(it) }
+            for (a in cat.aliases) if (!target.aliases.contains(a)) target.aliases.add(a)
+            for (s in cat.samples) {
+                val src = File(tmpSounds, s.file)
+                if (!src.exists()) continue
+                var destName = s.file
+                if (target.samples.any { it.file == destName }) {
+                    destName = "i_${System.currentTimeMillis()}_${(0..9999).random()}.wav"
+                }
+                src.copyTo(File(lib.soundsDir, destName), overwrite = true)
+                target.samples.add(Sample(destName, s.label, s.frames))
+                added++
+            }
+        }
+
+        lib.save()
+        modelJson?.let { lib.modelFile.writeBytes(it) }
+        tmpDir.deleteRecursively()
+        return "Imported ${parsed.size} categories, $added sounds"
+    }
+
+    private fun parseCategories(json: String): List<Category> {
+        val out = ArrayList<Category>()
+        try {
+            val root = org.json.JSONObject(json)
+            val arr = root.optJSONArray("categories") ?: return out
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val c = Category(o.getString("name"))
+                val al = o.optJSONArray("aliases")
+                if (al != null) for (j in 0 until al.length()) c.aliases.add(al.getString(j))
+                val sa = o.optJSONArray("samples")
+                if (sa != null) for (j in 0 until sa.length()) {
+                    val s = sa.getJSONObject(j)
+                    c.samples.add(Sample(s.getString("file"), s.optString("label", ""), s.optInt("frames", 0)))
+                }
+                out.add(c)
+            }
+        } catch (e: Exception) {
+        }
+        return out
+    }
+}
