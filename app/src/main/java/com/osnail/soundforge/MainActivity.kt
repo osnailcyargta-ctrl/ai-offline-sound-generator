@@ -21,7 +21,8 @@ import org.json.JSONObject
 class MainActivity : AppCompatActivity() {
 
     private lateinit var lib: Library
-    private var model: NgramModel? = null
+    private var matcher: NgramModel? = null
+    private var melModel: MelGru? = null
     private var lastPcm: FloatArray? = null
     private var pendingCategory: Category? = null
 
@@ -32,6 +33,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var txtModel: TextView
     private lateinit var txtStatus: TextView
     private lateinit var listCategories: LinearLayout
+    private lateinit var trainProgress: android.widget.ProgressBar
+    private lateinit var txtTrainProgress: TextView
 
     // ---- file pickers -------------------------------------------------
 
@@ -88,6 +91,8 @@ class MainActivity : AppCompatActivity() {
         txtModel = findViewById(R.id.txtModel)
         txtStatus = findViewById(R.id.txtStatus)
         listCategories = findViewById(R.id.listCategories)
+        trainProgress = findViewById(R.id.trainProgress)
+        txtTrainProgress = findViewById(R.id.txtTrainProgress)
 
         lib = Library(this)
         lib.load()
@@ -131,11 +136,12 @@ class MainActivity : AppCompatActivity() {
     // ---- model --------------------------------------------------------
 
     private fun loadModel() {
-        model = try {
+        matcher = try {
             if (lib.modelFile.exists()) NgramModel.fromJson(JSONObject(lib.modelFile.readText())) else null
         } catch (e: Exception) {
             null
         }
+        melModel = Trainer.loadModel(lib)
     }
 
     private fun train() {
@@ -143,27 +149,64 @@ class MainActivity : AppCompatActivity() {
             toast("Add a category first")
             return
         }
+        if (Trainer.isTraining()) {
+            toast("Training already running")
+            return
+        }
+
+        // instant text-matcher rebuild (cheap, no need to wait for GRU training)
         val m = NgramModel(3)
         m.train(lib.categories)
-        model = m
-        updateModelInfo()
+        matcher = m
         try {
             lib.modelFile.writeText(m.toJson().toString())
-            status("Model trained on ${m.trainedCategories} categories")
         } catch (e: Exception) {
-            // The in-memory model is live either way; only persistence failed.
-            status("Trained, but saving model.json failed: ${e.message}")
+            // The matcher is live in memory either way; only persistence failed.
+            status("Matcher saved failed: ${e.message}")
+        }
+
+        trainProgress.visibility = android.view.View.VISIBLE
+        txtTrainProgress.visibility = android.view.View.VISIBLE
+        findViewById<Button>(R.id.btnTrain).isEnabled = false
+
+        Trainer.startTraining(lifecycleScope, lib, epochs = 150) { s -> onTrainStatus(s) }
+    }
+
+    private fun onTrainStatus(s: TrainStatus) {
+        if (s.training) {
+            val pct = if (s.totalEpochs > 0) (100 * s.epoch / s.totalEpochs) else 0
+            trainProgress.progress = pct
+            txtTrainProgress.text = s.message
+        } else {
+            trainProgress.visibility = android.view.View.GONE
+            txtTrainProgress.visibility = android.view.View.GONE
+            findViewById<Button>(R.id.btnTrain).isEnabled = true
+            status(s.message)
+            melModel = Trainer.loadModel(lib)
+            updateModelInfo()
         }
     }
 
     private fun updateModelInfo() {
-        val m = model
-        txtModel.text = if (m == null || !m.isTrained) {
-            "Not trained yet. Add categories + sounds, then hit TRAIN."
+        val mm = melModel
+        val meta = lib.trainMeta()
+        txtModel.text = if (mm == null) {
+            "Not trained yet. Add categories + sounds, then hit TRAIN AI. (${lib.totalSamples()} samples ready)"
         } else {
-            "Trained: ${m.trainedCategories} categories, ${m.vocabSize} n-grams (n=${m.n}) • " +
-                "${lib.totalSamples()} samples, ${lib.storageBytes() / 1024} KB"
+            val loss = meta?.optDouble("final_loss")
+            "Trained: ${mm.categories.size} categories (GRU, ~${paramCountKb(mm)} KB)" +
+                (if (loss != null && !loss.isNaN()) " • loss ${"%.4f".format(loss)}" else "") +
+                " • ${lib.totalSamples()} samples, ${lib.storageBytes() / 1024} KB"
         }
+    }
+
+    private fun paramCountKb(m: MelGru): Int {
+        val inDim = m.nMels + m.embedDim
+        val h = m.hidden
+        val count = h * inDim * 3 + h * h * 3 + h * 3 +
+            m.nMels * h + m.nMels +
+            m.categories.size * m.embedDim
+        return (count * 8) / 1024
     }
 
     // ---- generation ---------------------------------------------------
@@ -171,8 +214,10 @@ class MainActivity : AppCompatActivity() {
     private fun generate() {
         val prompt = inputPrompt.text.toString().trim()
         if (prompt.isEmpty()) { toast("Type a prompt"); return }
-        val m = model
-        if (m == null || !m.isTrained) { toast("Train the model first"); return }
+        val m = matcher
+        if (m == null || !m.isTrained) { toast("Train AI first"); return }
+        val mm = melModel
+        if (mm == null) { toast("Train AI first — no generative model yet"); return }
 
         val matches = m.match(prompt)
         if (matches.isEmpty()) {
@@ -181,9 +226,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         val variation = seekVariation.progress / 100f
+        txtResult.text = "Generating..."
         lifecycleScope.launch {
             val result = withContext(Dispatchers.Default) {
-                Generator.generate(lib, matches, variation)
+                Generator.generate(mm, matches, variation)
             }
             if (result.pcm.isEmpty()) {
                 txtResult.text = result.log

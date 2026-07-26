@@ -144,7 +144,27 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="TRAIN MODEL" />
+                android:text="TRAIN AI" />
+
+            <ProgressBar
+                android:id="@+id/trainProgress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:max="100"
+                android:progress="0"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/txtTrainProgress"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text=""
+                android:textColor="@color/accent2"
+                android:textSize="11sp"
+                android:visibility="gone" />
         </LinearLayout>
 
         <!-- CATEGORIES -->

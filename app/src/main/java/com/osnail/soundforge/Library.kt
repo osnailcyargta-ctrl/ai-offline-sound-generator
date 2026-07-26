@@ -18,6 +18,7 @@ class Library(private val ctx: Context) {
     val soundsDir: File = File(ctx.filesDir, "sounds").apply { mkdirs() }
     val libFile: File = File(ctx.filesDir, "library.json")
     val modelFile: File = File(ctx.filesDir, "model.json")
+    val modelDir: File = File(ctx.filesDir, "model").apply { mkdirs() }
 
     val categories = mutableListOf<Category>()
 
@@ -97,4 +98,19 @@ class Library(private val ctx: Context) {
     fun totalSamples(): Int = categories.sumOf { it.samples.size }
 
     fun storageBytes(): Long = soundsDir.listFiles()?.sumOf { it.length() } ?: 0L
+
+    fun saveTrainMeta(categories: List<String>, samplesUsed: Int, finalLoss: Double) {
+        val o = JSONObject()
+        o.put("categories", JSONArray(categories))
+        o.put("samples_used", samplesUsed)
+        o.put("final_loss", finalLoss)
+        o.put("trained_at", System.currentTimeMillis())
+        File(modelDir, "train_meta.json").writeText(o.toString())
+    }
+
+    fun trainMeta(): JSONObject? {
+        val f = File(modelDir, "train_meta.json")
+        if (!f.exists()) return null
+        return try { JSONObject(f.readText()) } catch (e: Exception) { null }
+    }
 }

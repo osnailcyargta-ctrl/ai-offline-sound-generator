@@ -10,7 +10,9 @@ import java.util.zip.ZipOutputStream
 /**
  * A .sfpack file is just a zip:
  *   library.json
- *   model.json (optional)
+ *   model.json (n-gram text matcher, optional)
+ *   model/melgru.bin (trained generative model, optional)
+ *   model/train_meta.json (optional)
  *   sounds/ (one .wav per sample)
  * Copy it to another phone, hit Import, and the whole trained set moves over.
  */
@@ -27,6 +29,18 @@ object DataPack {
             if (lib.modelFile.exists()) {
                 zip.putNextEntry(ZipEntry("model.json"))
                 zip.write(lib.modelFile.readBytes())
+                zip.closeEntry()
+            }
+            val gruFile = Trainer.modelFile(lib)
+            if (gruFile.exists()) {
+                zip.putNextEntry(ZipEntry("model/melgru.bin"))
+                zip.write(gruFile.readBytes())
+                zip.closeEntry()
+            }
+            val metaFile = File(lib.modelDir, "train_meta.json")
+            if (metaFile.exists()) {
+                zip.putNextEntry(ZipEntry("model/train_meta.json"))
+                zip.write(metaFile.readBytes())
                 zip.closeEntry()
             }
             for (cat in lib.categories) {
@@ -52,6 +66,8 @@ object DataPack {
 
         var libJson: ByteArray? = null
         var modelJson: ByteArray? = null
+        var gruBytes: ByteArray? = null
+        var trainMetaBytes: ByteArray? = null
 
         ZipInputStream(input.buffered()).use { zip ->
             var entry: ZipEntry? = zip.nextEntry
@@ -60,6 +76,8 @@ object DataPack {
                 when {
                     name.endsWith("library.json") -> libJson = zip.readBytes()
                     name.endsWith("model.json") -> modelJson = zip.readBytes()
+                    name.endsWith("melgru.bin") -> gruBytes = zip.readBytes()
+                    name.endsWith("train_meta.json") -> trainMetaBytes = zip.readBytes()
                     name.contains("sounds/") && name.endsWith(".wav") -> {
                         val safe = name.substringAfterLast('/')
                         if (safe.isNotEmpty()) {
@@ -82,6 +100,10 @@ object DataPack {
         if (!merge) {
             lib.soundsDir.listFiles()?.forEach { it.delete() }
             lib.categories.clear()
+            if (gruBytes == null) {
+                Trainer.modelFile(lib).delete()
+                File(lib.modelDir, "train_meta.json").delete()
+            }
         }
 
         var added = 0
@@ -103,8 +125,11 @@ object DataPack {
 
         lib.save()
         modelJson?.let { lib.modelFile.writeBytes(it) }
+        gruBytes?.let { Trainer.modelFile(lib).writeBytes(it) }
+        trainMetaBytes?.let { File(lib.modelDir, "train_meta.json").writeBytes(it) }
         tmpDir.deleteRecursively()
-        return "Imported ${parsed.size} categories, $added sounds"
+        val gruNote = if (gruBytes != null) ", trained model included" else ""
+        return "Imported ${parsed.size} categories, $added sounds$gruNote"
     }
 
     private fun parseCategories(json: String): List<Category> {
