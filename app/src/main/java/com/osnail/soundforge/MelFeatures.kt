@@ -10,74 +10,97 @@ object MelFeatures {
 
     private fun hann(n: Int): DoubleArray = DoubleArray(n) { 0.5 - 0.5 * cos(2 * PI * it / n) }
 
-    // ---------------------------------------------------------- STFT/ISTFT
+    /** Number of STFT frames a signal of [len] samples produces. */
+    private fun frameCount(len: Int, nFft: Int, hop: Int): Int =
+        maxOf(1, 1 + (len + 2 * (nFft / 2) - nFft) / hop)
 
-    fun stft(x: FloatArray, nFft: Int = N_FFT, hop: Int = HOP): Pair<Array<DoubleArray>, Array<DoubleArray>> {
-        val win = hann(nFft)
+    // ---------------------------------------------------------- STFT workspace
+
+    /**
+     * Every buffer an STFT/ISTFT of one fixed (nFft, hop, nFrames) shape needs,
+     * allocated once and overwritten in place.
+     *
+     * Spectrograms are flat DoubleArrays indexed `[k * nFrames + f]` rather than
+     * `Array<DoubleArray>`, so a spectrogram is one object instead of freqBins of
+     * them. Combined with reusing these buffers, a 24-iteration Griffin-Lim run
+     * costs the same memory as a single iteration — it used to allocate a fresh
+     * set on every pass.
+     */
+    private class Stft(val nFft: Int, val hop: Int, val nFrames: Int, signalLen: Int) {
         val pad = nFft / 2
-        val padded = DoubleArray(x.size + 2 * pad)
-        for (i in x.indices) padded[i + pad] = x[i].toDouble()
-        // reflect padding at the edges (cheap edge mirror, good enough here)
-        for (i in 0 until pad) {
-            padded[pad - 1 - i] = if (i < x.size) x[i].toDouble() else 0.0
-            val srcIdx = x.size - 1 - i
-            padded[pad + x.size + i] = if (srcIdx >= 0) x[srcIdx].toDouble() else 0.0
-        }
-
-        var nFrames = 1 + (padded.size - nFft) / hop
-        if (nFrames < 1) nFrames = 1
         val freqBins = nFft / 2 + 1
-        val re = Array(freqBins) { DoubleArray(nFrames) }
-        val im = Array(freqBins) { DoubleArray(nFrames) }
-
-        val fre = DoubleArray(nFft)
-        val fim = DoubleArray(nFft)
-        for (f in 0 until nFrames) {
-            val start = f * hop
-            for (i in 0 until nFft) {
-                val idx = start + i
-                fre[i] = (if (idx < padded.size) padded[idx] else 0.0) * win[i]
-                fim[i] = 0.0
-            }
-            Fft.fft(fre, fim)
-            for (k in 0 until freqBins) {
-                re[k][f] = fre[k]
-                im[k][f] = fim[k]
-            }
-        }
-        return Pair(re, im)
-    }
-
-    fun istft(re: Array<DoubleArray>, im: Array<DoubleArray>, hop: Int = HOP): FloatArray {
-        val freqBins = re.size
-        val nFft = (freqBins - 1) * 2
-        val nFrames = re[0].size
-        val win = hann(nFft)
+        val specSize = freqBins * nFrames
         val outLen = nFft + hop * (nFrames - 1)
-        val out = DoubleArray(outLen)
-        val norm = DoubleArray(outLen)
+        val audioLen = if (outLen > 2 * pad) outLen - 2 * pad else outLen
 
-        val fre = DoubleArray(nFft)
-        val fim = DoubleArray(nFft)
-        for (f in 0 until nFrames) {
-            // rebuild full spectrum via conjugate symmetry
-            for (k in 0 until freqBins) { fre[k] = re[k][f]; fim[k] = im[k][f] }
-            for (k in 1 until nFft - freqBins + 1) {
-                fre[freqBins - 1 + k] = re[freqBins - 1 - k][f]
-                fim[freqBins - 1 + k] = -im[freqBins - 1 - k][f]
+        private val win = hann(nFft)
+        private val fre = DoubleArray(nFft)
+        private val fim = DoubleArray(nFft)
+        private val padded = DoubleArray(maxOf(signalLen, audioLen) + 2 * pad)
+        private val acc = DoubleArray(outLen)
+        private val norm = DoubleArray(outLen)
+
+        /** Shared output of [synthesize]; valid until the next call. */
+        val audio = FloatArray(audioLen)
+
+        fun spectrogram() = DoubleArray(specSize)
+
+        /** STFT of the first [len] samples of [x], written into [re] and [im]. */
+        fun analyze(x: FloatArray, len: Int, re: DoubleArray, im: DoubleArray) {
+            java.util.Arrays.fill(padded, 0.0)
+            for (i in 0 until len) padded[i + pad] = x[i].toDouble()
+            // reflect padding at the edges (cheap edge mirror, good enough here)
+            for (i in 0 until pad) {
+                padded[pad - 1 - i] = if (i < len) x[i].toDouble() else 0.0
+                val srcIdx = len - 1 - i
+                val dstIdx = pad + len + i
+                if (dstIdx < padded.size) {
+                    padded[dstIdx] = if (srcIdx >= 0) x[srcIdx].toDouble() else 0.0
+                }
             }
-            Fft.ifft(fre, fim)
-            val start = f * hop
-            for (i in 0 until nFft) {
-                out[start + i] += fre[i] * win[i]
-                norm[start + i] += win[i] * win[i]
+
+            for (f in 0 until nFrames) {
+                val start = f * hop
+                for (i in 0 until nFft) {
+                    val idx = start + i
+                    fre[i] = (if (idx < padded.size) padded[idx] else 0.0) * win[i]
+                    fim[i] = 0.0
+                }
+                Fft.fft(fre, fim)
+                for (k in 0 until freqBins) {
+                    re[k * nFrames + f] = fre[k]
+                    im[k * nFrames + f] = fim[k]
+                }
             }
         }
-        for (i in out.indices) if (norm[i] > 1e-8) out[i] /= norm[i]
 
-        val pad = nFft / 2
-        val trimmed = if (outLen > 2 * pad) out.copyOfRange(pad, outLen - pad) else out
-        return FloatArray(trimmed.size) { trimmed[it].toFloat() }
+        /** ISTFT of [re]/[im] into [audio], which it returns. */
+        fun synthesize(re: DoubleArray, im: DoubleArray): FloatArray {
+            java.util.Arrays.fill(acc, 0.0)
+            java.util.Arrays.fill(norm, 0.0)
+            for (f in 0 until nFrames) {
+                // rebuild full spectrum via conjugate symmetry
+                for (k in 0 until freqBins) {
+                    fre[k] = re[k * nFrames + f]
+                    fim[k] = im[k * nFrames + f]
+                }
+                for (k in 1 until nFft - freqBins + 1) {
+                    fre[freqBins - 1 + k] = re[(freqBins - 1 - k) * nFrames + f]
+                    fim[freqBins - 1 + k] = -im[(freqBins - 1 - k) * nFrames + f]
+                }
+                Fft.ifft(fre, fim)
+                val start = f * hop
+                for (i in 0 until nFft) {
+                    acc[start + i] += fre[i] * win[i]
+                    norm[start + i] += win[i] * win[i]
+                }
+            }
+            for (i in acc.indices) if (norm[i] > 1e-8) acc[i] /= norm[i]
+
+            val off = if (outLen > 2 * pad) pad else 0
+            for (i in 0 until audioLen) audio[i] = acc[off + i].toFloat()
+            return audio
+        }
     }
 
     // ---------------------------------------------------------- mel filterbank
@@ -97,7 +120,7 @@ object MelFeatures {
             var left = binPts[m - 1]; var center = binPts[m]; var right = binPts[m + 1]
             if (center == left) center += 1
             if (right == center) right += 1
-            for (k in left until center) fb[m - 1][k] = (k - left).toDouble() / max(1, center - left)
+            for (k in left until center) if (k < nFreqs) fb[m - 1][k] = (k - left).toDouble() / max(1, center - left)
             for (k in center until right) if (k < nFreqs) fb[m - 1][k] = (right - k).toDouble() / max(1, right - center)
         }
         return fb
@@ -169,53 +192,78 @@ object MelFeatures {
 
     fun audioToMel(x: FloatArray, sr: Int, nFft: Int = N_FFT, hop: Int = HOP, nMels: Int = N_MELS): Array<FloatArray> {
         ensureBasis(sr)
-        val (re, im) = stft(x, nFft, hop)
-        val freqBins = re.size; val nFrames = re[0].size
-        val mag = Array(freqBins) { DoubleArray(nFrames) }
-        for (k in 0 until freqBins) for (f in 0 until nFrames) mag[k][f] = hypot(re[k][f], im[k][f])
+        val nFrames = frameCount(x.size, nFft, hop)
+        val st = Stft(nFft, hop, nFrames, x.size)
 
-        val mel = matMul(melBasis, mag) // (nMels x nFrames)
-        val out = Array(nFrames) { FloatArray(nMels) }
-        for (f in 0 until nFrames) for (m in 0 until nMels) {
-            out[f][m] = ln(max(mel[m][f], 1e-5)).toFloat()
+        val re = st.spectrogram()
+        val im = st.spectrogram()
+        st.analyze(x, x.size, re, im)
+        // Magnitude overwrites `re` instead of filling a third spectrogram.
+        for (i in re.indices) re[i] = hypot(re[i], im[i])
+
+        val mel = DoubleArray(nMels * nFrames)
+        for (m in 0 until nMels) {
+            val row = melBasis[m]
+            val mBase = m * nFrames
+            for (k in 0 until st.freqBins) {
+                val w = row[k]
+                if (w == 0.0) continue
+                val kBase = k * nFrames
+                for (f in 0 until nFrames) mel[mBase + f] += w * re[kBase + f]
+            }
         }
-        return out
+        return Array(nFrames) { f -> FloatArray(nMels) { m -> ln(max(mel[m * nFrames + f], 1e-5)).toFloat() } }
     }
 
     fun melToAudio(logMel: Array<FloatArray>, sr: Int, nFft: Int = N_FFT, hop: Int = HOP, nIter: Int = 24): FloatArray {
         ensureBasis(sr)
         val nFrames = logMel.size
-        val nMels = if (nFrames > 0) logMel[0].size else N_MELS
-        val mel = Array(nMels) { m -> DoubleArray(nFrames) { f -> exp(logMel[f][m].toDouble()) } }
-        val magFull = matMul(melPinv, mel) // (nFreqs x nFrames)
-        val freqBins = magFull.size
-        for (k in 0 until freqBins) for (f in 0 until nFrames) magFull[k][f] = max(magFull[k][f], 0.0)
+        if (nFrames == 0) return FloatArray(0)
+        val nMels = logMel[0].size
+        val st = Stft(nFft, hop, nFrames, hop * maxOf(0, nFrames - 1))
+        val freqBins = st.freqBins
 
-        val rnd = java.util.Random()
-        var re = Array(freqBins) { k -> DoubleArray(nFrames) { f -> magFull[k][f] * cos(rnd.nextDouble() * 2 * PI) } }
-        var im = Array(freqBins) { k -> DoubleArray(nFrames) { f -> 0.0 } }
-        for (k in 0 until freqBins) for (f in 0 until nFrames) {
-            val phase = rnd.nextDouble() * 2 * PI
-            re[k][f] = magFull[k][f] * cos(phase)
-            im[k][f] = magFull[k][f] * sin(phase)
+        val mel = DoubleArray(nMels * nFrames)
+        for (m in 0 until nMels) for (f in 0 until nFrames) {
+            mel[m * nFrames + f] = exp(logMel[f][m].toDouble())
         }
 
-        var audio = FloatArray(0)
-        repeat(nIter) {
-            audio = istft(re, im, hop)
-            val (rre, rim) = stft(audio, nFft, hop)
-            val n = min(rre[0].size, nFrames)
-            val newRe = Array(freqBins) { DoubleArray(nFrames) }
-            val newIm = Array(freqBins) { DoubleArray(nFrames) }
-            for (k in 0 until freqBins) for (f in 0 until n) {
-                val mag = hypot(rre[k][f], rim[k][f]).let { if (it < 1e-8) 1e-8 else it }
-                val ratio = magFull[k][f] / mag
-                newRe[k][f] = rre[k][f] * ratio
-                newIm[k][f] = rim[k][f] * ratio
+        val magFull = DoubleArray(st.specSize)
+        for (k in 0 until freqBins) {
+            val row = melPinv[k]
+            val kBase = k * nFrames
+            for (m in 0 until nMels) {
+                val w = row[m]
+                if (w == 0.0) continue
+                val mBase = m * nFrames
+                for (f in 0 until nFrames) magFull[kBase + f] += w * mel[mBase + f]
             }
-            re = newRe; im = newIm
         }
-        return istft(re, im, hop)
+        for (i in magFull.indices) if (magFull[i] < 0.0) magFull[i] = 0.0
+
+        val re = st.spectrogram()
+        val im = st.spectrogram()
+        val rnd = java.util.Random()
+        for (i in 0 until st.specSize) {
+            val phase = rnd.nextDouble() * 2 * PI
+            re[i] = magFull[i] * cos(phase)
+            im[i] = magFull[i] * sin(phase)
+        }
+
+        // Griffin-Lim: resynthesize, re-analyze, snap magnitudes back to the
+        // target. `re`/`im` are rewritten in place on every pass.
+        repeat(nIter) {
+            val audio = st.synthesize(re, im)
+            st.analyze(audio, audio.size, re, im)
+            for (i in 0 until st.specSize) {
+                var mag = hypot(re[i], im[i])
+                if (mag < 1e-8) mag = 1e-8
+                val ratio = magFull[i] / mag
+                re[i] *= ratio
+                im[i] *= ratio
+            }
+        }
+        // synthesize() hands back its shared buffer, so the caller gets a copy.
+        return st.synthesize(re, im).copyOf()
     }
 }
-
