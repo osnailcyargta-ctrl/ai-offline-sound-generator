@@ -11,7 +11,7 @@ import java.util.zip.ZipOutputStream
  * A .sfpack file is just a zip:
  *   library.json
  *   model.json (optional)
- *   sounds/*.wav
+ *   sounds/ (one .wav per sample)
  * Copy it to another phone, hit Import, and the whole trained set moves over.
  */
 object DataPack {
