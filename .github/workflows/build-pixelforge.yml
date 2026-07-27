@@ -1,13 +1,13 @@
-name: Build SoundForge APK
+name: Build PixelForge APK
 
 on:
   push:
     branches: [ '**' ]
-    paths-ignore:
+    paths:
       - 'PixelForge/**'
       - '.github/workflows/build-pixelforge.yml'
   pull_request:
-    paths-ignore:
+    paths:
       - 'PixelForge/**'
       - '.github/workflows/build-pixelforge.yml'
   workflow_dispatch:
@@ -16,14 +16,17 @@ permissions:
   contents: write
 
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-pixelforge-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # A hung compile should fail the run, not sit there burning the 6h default.
     timeout-minutes: 30
+
+    defaults:
+      run:
+        working-directory: PixelForge
 
     steps:
       - uses: actions/checkout@v4
@@ -50,9 +53,9 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-pixelforge-${{ runner.os }}-${{ hashFiles('PixelForge/**/*.gradle.kts', 'PixelForge/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            gradle-pixelforge-${{ runner.os }}-
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -66,14 +69,14 @@ jobs:
           set -e
           mkdir -p out
           cp app/build/outputs/apk/debug/app-debug.apk \
-             "out/SoundForge-debug-${{ github.run_number }}.apk"
+             "out/PixelForge-debug-${{ github.run_number }}.apk"
           ls -lh out
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SoundForge-debug-apk
-          path: out/*.apk
+          name: PixelForge-debug-apk
+          path: PixelForge/out/*.apk
           if-no-files-found: error
 
       - name: Publish release
@@ -82,7 +85,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "build-${{ github.run_number }}" out/*.apk \
-            --title "SoundForge build ${{ github.run_number }}" \
+          gh release create "pixelforge-build-${{ github.run_number }}" out/*.apk \
+            --title "PixelForge build ${{ github.run_number }}" \
             --notes "Debug APK built from \`${{ github.sha }}\` (branch \`${{ github.ref_name }}\`)." \
             --target "${{ github.sha }}"

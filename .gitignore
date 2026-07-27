@@ -1,6 +1,6 @@
 *.iml
 .gradle
-/local.properties
+local.properties
 /.idea
 .DS_Store
 /build
@@ -8,3 +8,9 @@
 /captures
 .externalNativeBuild
 .cxx
+
+# PixelForge is a second, independent Gradle build in its own directory.
+/PixelForge/build
+/PixelForge/app/build
+/PixelForge/out
+/out
