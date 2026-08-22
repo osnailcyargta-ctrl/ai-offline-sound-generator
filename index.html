@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steam Workshop Downloader</title>
+<style>
+  :root {
+    --bg: #1b2838;
+    --bg-dark: #171a21;
+    --panel: #16202d;
+    --panel-2: #2a475e;
+    --line: #33475b;
+    --text: #c7d5e0;
+    --muted: #8f98a0;
+    --blue: #66c0f4;
+    --green-1: #75b022;
+    --green-2: #588a1b;
+    --red: #d94141;
+    --amber: #e0a44a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 "Motiva Sans", Arial, Helvetica, sans-serif;
+  }
+  header {
+    background: var(--bg-dark);
+    border-bottom: 1px solid #000;
+    padding: 16px 20px;
+  }
+  header h1 { margin: 0; font-size: 19px; font-weight: 500; color: #fff; }
+  header p { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 20px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    margin: 0 0 12px;
+    font-size: 12px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--blue);
+    font-weight: 700;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text] {
+    width: 100%;
+    background: var(--bg-dark);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    color: var(--text);
+    padding: 9px 10px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--blue); }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; min-height: 15px; }
+  .hint.ok { color: var(--blue); }
+  .hint.bad { color: var(--red); }
+  button {
+    margin-top: 14px;
+    background: linear-gradient(to bottom, var(--green-1), var(--green-2));
+    border: none;
+    border-radius: 2px;
+    color: #fff;
+    padding: 10px 22px;
+    font-size: 14px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.15); }
+  button:disabled { background: #3a4b5c; color: #7d8a95; cursor: not-allowed; }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 3px 9px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--text);
+  }
+  .pill.running { background: #2c5c86; color: #cfe8ff; }
+  .pill.done    { background: #33591b; color: #d6f0b8; }
+  .pill.failed  { background: #6b2222; color: #f3c9c9; }
+  .pill.queued  { background: #5a4a1e; color: #f0e0b8; }
+  #log {
+    background: #0e1419;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 10px;
+    height: 300px;
+    overflow-y: auto;
+    font: 12px/1.45 "Consolas", "DejaVu Sans Mono", monospace;
+    color: #b9c6d2;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #log:empty::before { content: "Log will appear here."; color: var(--muted); }
+  .msg { margin-top: 10px; font-size: 13px; }
+  .msg.failed { color: var(--amber); }
+  .msg.done { color: #a4d007; }
+  table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  td.size { color: var(--muted); white-space: nowrap; width: 1%; }
+  a { color: var(--blue); text-decoration: none; word-break: break-all; }
+  a:hover { text-decoration: underline; }
+  .notes { font-size: 12px; color: var(--muted); }
+  .notes li { margin-bottom: 6px; }
+  .empty { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Steam Workshop Downloader</h1>
+  <p>Anonymous SteamCMD downloader — enter any App ID and Workshop item.</p>
+</header>
+
+<div class="wrap">
+
+  <div class="card">
+    <h2>Download</h2>
+
+    <label for="appid">App ID</label>
+    <input type="text" id="appid" placeholder="e.g. 431960" autocomplete="off" inputmode="numeric">
+    <div class="hint" id="appidHint">The game's numeric Steam App ID.</div>
+
+    <label for="itemid">Workshop item ID or link</label>
+    <input type="text" id="itemid"
+           placeholder="123456789 or https://steamcommunity.com/sharedfiles/filedetails/?id=123456789"
+           autocomplete="off">
+    <div class="hint" id="itemidHint">Paste the numeric ID or the full Workshop URL.</div>
+
+    <div class="row">
+      <button id="btn">Download</button>
+      <span class="pill" id="pill" hidden></span>
+      <span class="pill" id="elapsed" hidden></span>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>SteamCMD log</h2>
+    <div id="log"></div>
+  </div>
+
+  <div class="card">
+    <h2>Downloaded files</h2>
+    <div id="files"><div class="empty">Nothing downloaded yet.</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Before you report a bug</h2>
+    <ul class="notes">
+      <li><strong>Removed / taken-down items usually stay unavailable.</strong> If Steam has
+          pulled a Workshop item, anonymous login almost always still fails. That is a Steam
+          restriction, not a fault in this app.</li>
+      <li><strong>Some items need a real Steam account.</strong> Depending on the creator's
+          privacy settings or the game's DRM, an item may be unreachable with
+          <code>login anonymous</code> — which is all this app uses.</li>
+      <li><strong>The App ID must match the item.</strong> A mismatched App ID makes SteamCMD
+          report a generic failure that looks the same as a removed item.</li>
+      <li>Downloads run one at a time; a second request waits its turn.</li>
+    </ul>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const appidEl = $("appid"), itemidEl = $("itemid"), btn = $("btn");
+  const pill = $("pill"), elapsedEl = $("elapsed"), msg = $("msg");
+  const logEl = $("log"), filesEl = $("files");
+
+  let timer = null, nextIndex = 0, currentJob = null;
+
+  // Mirror of the server-side parser so the field can confirm what it read
+  // before anything is submitted.
+  function parseItemId(raw) {
+    raw = (raw || "").trim();
+    if (!raw) return null;
+    if (/^\d+$/.test(raw)) return raw;
+    const q = raw.match(/[?&]id=(\d+)/);
+    if (q) return q[1];
+    const d = raw.match(/\d{4,}/);
+    return d ? d[0] : null;
+  }
+
+  function setHint(el, text, cls) {
+    el.textContent = text;
+    el.className = "hint" + (cls ? " " + cls : "");
+  }
+
+  itemidEl.addEventListener("input", () => {
+    const raw = itemidEl.value.trim();
+    if (!raw) return setHint($("itemidHint"), "Paste the numeric ID or the full Workshop URL.");
+    const id = parseItemId(raw);
+    if (id && id !== raw) setHint($("itemidHint"), "Detected item ID: " + id, "ok");
+    else if (id) setHint($("itemidHint"), "Item ID " + id, "ok");
+    else setHint($("itemidHint"), "No numeric ID found in that text.", "bad");
+  });
+
+  appidEl.addEventListener("input", () => {
+    const raw = appidEl.value.trim();
+    if (!raw) return setHint($("appidHint"), "The game's numeric Steam App ID.");
+    if (/^\d+$/.test(raw)) setHint($("appidHint"), "App ID " + raw, "ok");
+    else setHint($("appidHint"), "App ID must be digits only.", "bad");
+  });
+
+  function setPill(status) {
+    pill.hidden = false;
+    pill.className = "pill " + status;
+    pill.textContent = status;
+  }
+
+  function appendLog(lines) {
+    if (!lines || !lines.length) return;
+    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    logEl.textContent += lines.join("\n") + "\n";
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+    ));
+  }
+
+  async function loadFiles(appid, itemid) {
+    try {
+      const r = await fetch(`/api/files/${appid}/${itemid}`);
+      const d = await r.json();
+      if (!d.files || !d.files.length) {
+        filesEl.innerHTML = '<div class="empty">No files in ' + escapeHtml(d.path || "") + '</div>';
+        return;
+      }
+      let html = "<table><tr><th>File</th><th>Size</th></tr>";
+      for (const f of d.files) {
+        html += "<tr><td><a href=\"" + escapeHtml(f.url) + "\">" + escapeHtml(f.name) +
+                "</a></td><td class=\"size\">" + escapeHtml(f.size_human) + "</td></tr>";
+      }
+      html += "</table>";
+      filesEl.innerHTML = html;
+    } catch (e) {
+      filesEl.innerHTML = '<div class="empty">Could not list files: ' + escapeHtml(String(e)) + "</div>";
+    }
+  }
+
+  function stop() {
+    if (timer) { clearInterval(timer); timer = null; }
+    btn.disabled = false;
+    btn.textContent = "Download";
+  }
+
+  async function poll() {
+    if (!currentJob) return;
+    let d;
+    try {
+      const r = await fetch(`/api/status/${currentJob}?from=${nextIndex}`);
+      if (!r.ok) throw new Error("status " + r.status);
+      d = await r.json();
+    } catch (e) {
+      msg.textContent = "Lost contact with the server: " + e;
+      msg.className = "msg failed";
+      stop();
+      return;
+    }
+
+    appendLog(d.log);
+    nextIndex = d.next_index;
+    setPill(d.status);
+    elapsedEl.hidden = false;
+    elapsedEl.textContent = d.elapsed + "s";
+
+    if (d.status === "done" || d.status === "failed") {
+      msg.textContent = d.message;
+      msg.className = "msg " + d.status;
+      stop();
+      loadFiles(d.appid, d.itemid);
+    } else {
+      msg.textContent = d.message || "";
+      msg.className = "msg";
+    }
+  }
+
+  btn.addEventListener("click", async () => {
+    const appid = appidEl.value.trim();
+    const itemid = itemidEl.value.trim();
+    if (!/^\d+$/.test(appid)) { setHint($("appidHint"), "App ID must be digits only.", "bad"); return; }
+    if (!parseItemId(itemid)) { setHint($("itemidHint"), "No numeric ID found in that text.", "bad"); return; }
+
+    btn.disabled = true;
+    btn.textContent = "Working...";
+    logEl.textContent = "";
+    filesEl.innerHTML = '<div class="empty">Waiting for the download to finish...</div>';
+    msg.textContent = "";
+    msg.className = "msg";
+    nextIndex = 0;
+
+    let d;
+    try {
+      const r = await fetch("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appid, itemid })
+      });
+      d = await r.json();
+      if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    } catch (e) {
+      msg.textContent = String(e.message || e);
+      msg.className = "msg failed";
+      stop();
+      return;
+    }
+
+    currentJob = d.job_id;
+    setPill("queued");
+    poll();
+    timer = setInterval(poll, 1000);
+  });
+
+  [appidEl, itemidEl].forEach((el) =>
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter" && !btn.disabled) btn.click(); })
+  );
+})();
+</script>
+
+</body>
+</html>

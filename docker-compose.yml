@@ -1,0 +1,32 @@
+name: steam-workshop-downloader
+
+services:
+  workshop-downloader:
+    build: .
+    image: steam-workshop-downloader:latest
+    container_name: steam-workshop-downloader
+    restart: unless-stopped
+
+    ports:
+      - "9976:9976"
+
+    volumes:
+      # Everything SteamCMD downloads lands under this path, so persisting it
+      # keeps finished downloads across container restarts and rebuilds.
+      - workshop-content:/steamcmd/steamapps/workshop
+
+    environment:
+      # Seconds before a wedged SteamCMD run is killed.
+      JOB_TIMEOUT: "3600"
+      TZ: "UTC"
+
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9976/api/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  workshop-content:
